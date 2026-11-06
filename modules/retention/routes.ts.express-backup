@@ -1,0 +1,1372 @@
+/**
+ * Retention Campaign REST API Routes
+ *
+ * Endpoints for managing retention strategies, campaigns, templates, and analytics
+ */
+
+import { Router, type Request, type Response } from 'express';
+import { logger } from '../../shared/logger/index.js';
+import { prisma } from '../../infrastructure/postgres/index.js';
+import {
+  createStrategy,
+  updateStrategy,
+  listStrategies,
+  getStrategy,
+  deleteStrategy,
+  triggerCampaign,
+  markCampaignConverted,
+  cancelCampaign,
+  createEmailTemplate,
+  updateEmailTemplate,
+  renderTemplate,
+} from './service.js';
+import { aggregateOrganizationMetrics, runDailyAggregation } from './metrics-aggregation.js';
+import { getQueueStats } from './queue.js';
+
+const router = Router();
+const log = logger.child({ module: 'retention-routes' });
+
+// ============================================================================
+// RETENTION STRATEGIES
+// ============================================================================
+
+/**
+ * POST /api/retention/strategies
+ * Create a new retention strategy
+ */
+router.post('/strategies', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId; // Assumes auth middleware sets req.user
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const strategy = await createStrategy({
+      organizationId,
+      ...req.body,
+    });
+
+    res.status(201).json(strategy);
+  } catch (error) {
+    log.error({ error }, 'Failed to create strategy');
+    res.status(500).json({ error: 'Failed to create strategy' });
+  }
+});
+
+/**
+ * GET /api/retention/strategies
+ * List all strategies for the organization
+ */
+router.get('/strategies', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const status = req.query.status as 'ACTIVE' | 'PAUSED' | 'ARCHIVED' | undefined;
+    const strategies = await listStrategies(organizationId, status);
+
+    res.json(strategies);
+  } catch (error) {
+    log.error({ error }, 'Failed to list strategies');
+    res.status(500).json({ error: 'Failed to list strategies' });
+  }
+});
+
+/**
+ * GET /api/retention/strategies/:id
+ * Get a single strategy by ID
+ */
+router.get('/strategies/:id', async (req: Request, res: Response) => {
+  try {
+    const strategy = await getStrategy(req.params.id);
+
+    if (!strategy) {
+      return res.status(404).json({ error: 'Strategy not found' });
+    }
+
+    // Check organization access
+    if (strategy.organizationId !== req.user?.organizationId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    res.json(strategy);
+  } catch (error) {
+    log.error({ error }, 'Failed to get strategy');
+    res.status(500).json({ error: 'Failed to get strategy' });
+  }
+});
+
+/**
+ * PUT /api/retention/strategies/:id
+ * Update a strategy
+ */
+router.put('/strategies/:id', async (req: Request, res: Response) => {
+  try {
+    const strategy = await updateStrategy(req.params.id, req.body);
+    res.json(strategy);
+  } catch (error) {
+    log.error({ error }, 'Failed to update strategy');
+    res.status(500).json({ error: 'Failed to update strategy' });
+  }
+});
+
+/**
+ * DELETE /api/retention/strategies/:id
+ * Delete (archive) a strategy
+ */
+router.delete('/strategies/:id', async (req: Request, res: Response) => {
+  try {
+    await deleteStrategy(req.params.id);
+    res.status(204).send();
+  } catch (error) {
+    log.error({ error }, 'Failed to delete strategy');
+    res.status(500).json({ error: 'Failed to delete strategy' });
+  }
+});
+
+// ============================================================================
+// CAMPAIGNS
+// ============================================================================
+
+/**
+ * POST /api/retention/campaigns/trigger
+ * Manually trigger a campaign for a customer
+ */
+router.post('/campaigns/trigger', async (req: Request, res: Response) => {
+  try {
+    const { strategyId, customerId, triggerType, triggerContext } = req.body;
+
+    const campaign = await triggerCampaign({
+      strategyId,
+      customerId,
+      triggerType,
+      triggerContext,
+    });
+
+    if (!campaign) {
+      return res.status(400).json({ error: 'Campaign not triggered (cooldown or filters)' });
+    }
+
+    res.status(201).json(campaign);
+  } catch (error) {
+    log.error({ error }, 'Failed to trigger campaign');
+    res.status(500).json({ error: 'Failed to trigger campaign' });
+  }
+});
+
+/**
+ * GET /api/retention/campaigns
+ * List campaigns with filters
+ */
+router.get('/campaigns', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const {
+      status,
+      strategyId,
+      customerId,
+      triggerType,
+      limit = '50',
+      offset = '0',
+    } = req.query;
+
+    const campaigns = await prisma.campaign.findMany({
+      where: {
+        organizationId,
+        ...(status && { status: status as any }),
+        ...(strategyId && { strategyId: strategyId as string }),
+        ...(customerId && { customerId: customerId as string }),
+        ...(triggerType && { triggerType: triggerType as any }),
+      },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+          },
+        },
+        strategy: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+        _count: {
+          select: {
+            actions: true,
+          },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+      take: parseInt(limit as string),
+      skip: parseInt(offset as string),
+    });
+
+    // Get total count
+    const total = await prisma.campaign.count({
+      where: {
+        organizationId,
+        ...(status && { status: status as any }),
+        ...(strategyId && { strategyId: strategyId as string }),
+        ...(customerId && { customerId: customerId as string }),
+        ...(triggerType && { triggerType: triggerType as any }),
+      },
+    });
+
+    res.json({
+      campaigns,
+      pagination: {
+        total,
+        limit: parseInt(limit as string),
+        offset: parseInt(offset as string),
+      },
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to list campaigns');
+    res.status(500).json({ error: 'Failed to list campaigns' });
+  }
+});
+
+/**
+ * GET /api/retention/campaigns/:id
+ * Get campaign details with actions
+ */
+router.get('/campaigns/:id', async (req: Request, res: Response) => {
+  try {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: req.params.id },
+      include: {
+        customer: true,
+        strategy: true,
+        actions: {
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    if (campaign.organizationId !== req.user?.organizationId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    res.json(campaign);
+  } catch (error) {
+    log.error({ error }, 'Failed to get campaign');
+    res.status(500).json({ error: 'Failed to get campaign' });
+  }
+});
+
+/**
+ * POST /api/retention/campaigns/:id/convert
+ * Mark a campaign as converted
+ */
+router.post('/campaigns/:id/convert', async (req: Request, res: Response) => {
+  try {
+    const { revenueRecovered } = req.body;
+    await markCampaignConverted(req.params.id, revenueRecovered);
+    res.status(200).json({ success: true });
+  } catch (error) {
+    log.error({ error }, 'Failed to mark campaign as converted');
+    res.status(500).json({ error: 'Failed to mark campaign as converted' });
+  }
+});
+
+/**
+ * POST /api/retention/campaigns/:id/cancel
+ * Cancel a campaign
+ */
+router.post('/campaigns/:id/cancel', async (req: Request, res: Response) => {
+  try {
+    const { reason } = req.body;
+    await cancelCampaign(req.params.id, reason);
+    res.status(200).json({ success: true });
+  } catch (error) {
+    log.error({ error }, 'Failed to cancel campaign');
+    res.status(500).json({ error: 'Failed to cancel campaign' });
+  }
+});
+
+// ============================================================================
+// EMAIL SEQUENCES
+// ============================================================================
+
+/**
+ * POST /api/retention/campaigns/:id/sequences
+ * Create a multi-step email sequence for a campaign
+ */
+router.post('/campaigns/:id/sequences', async (req: Request, res: Response) => {
+  try {
+    const { sequence } = req.body;
+
+    if (!sequence) {
+      return res.status(400).json({ error: 'Sequence definition required' });
+    }
+
+    const { createSequence } = await import('./sequences.js');
+    const result = await createSequence(req.params.id, sequence);
+
+    res.status(201).json({
+      success: true,
+      scheduledActions: result.scheduledActions,
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to create sequence');
+    res.status(500).json({ error: 'Failed to create sequence' });
+  }
+});
+
+/**
+ * GET /api/retention/campaigns/:id/sequences/progress
+ * Get progress of email sequences for a campaign
+ */
+router.get('/campaigns/:id/sequences/progress', async (req: Request, res: Response) => {
+  try {
+    const { getSequenceProgress } = await import('./sequences.js');
+    const progress = await getSequenceProgress(req.params.id);
+
+    res.json(progress);
+  } catch (error) {
+    log.error({ error }, 'Failed to get sequence progress');
+    res.status(500).json({ error: 'Failed to get sequence progress' });
+  }
+});
+
+/**
+ * POST /api/retention/campaigns/:id/sequences/:sequenceId/cancel
+ * Cancel a specific sequence
+ */
+router.post('/campaigns/:id/sequences/:sequenceId/cancel', async (req: Request, res: Response) => {
+  try {
+    const { cancelSequence } = await import('./sequences.js');
+    const result = await cancelSequence(req.params.id, req.params.sequenceId);
+
+    res.json({
+      success: true,
+      cancelledActions: result.cancelledActions,
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to cancel sequence');
+    res.status(500).json({ error: 'Failed to cancel sequence' });
+  }
+});
+
+/**
+ * GET /api/retention/sequences/templates
+ * Get predefined sequence templates
+ */
+router.get('/sequences/templates', async (req: Request, res: Response) => {
+  try {
+    const { SequenceTemplates } = await import('./sequences.js');
+
+    // Return template definitions (without actual template IDs)
+    res.json({
+      templates: [
+        {
+          name: 'trialEndingSequence',
+          description: '3-email trial reminder sequence (7d, 3d, 1d before trial ends)',
+          steps: 3,
+          stopOnConversion: true,
+        },
+        {
+          name: 'paymentRecoverySequence',
+          description: 'Escalating payment reminder sequence (gentle, urgent, final)',
+          steps: 3,
+          stopOnConversion: true,
+        },
+        {
+          name: 'churnPreventionSequence',
+          description: 'Multi-touch churn prevention with engagement-based branching',
+          steps: 1,
+          branches: 2,
+          stopOnConversion: true,
+        },
+      ],
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to get sequence templates');
+    res.status(500).json({ error: 'Failed to get sequence templates' });
+  }
+});
+
+// ============================================================================
+// CONVERSION FUNNEL TRACKING
+// ============================================================================
+
+/**
+ * GET /api/retention/analytics/funnel
+ * Get conversion funnel data for campaigns
+ */
+router.get('/analytics/funnel', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { strategyId, days = '30', triggerType } = req.query;
+
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(days as string));
+
+    const whereClause: any = {
+      organizationId,
+      startedAt: { gte: startDate },
+    };
+
+    if (strategyId) {
+      whereClause.strategyId = strategyId as string;
+    }
+
+    if (triggerType) {
+      whereClause.triggerType = triggerType;
+    }
+
+    // Get funnel counts
+    const [
+      triggered,
+      active,
+      converted,
+      cancelled,
+      failed,
+      completed,
+    ] = await Promise.all([
+      prisma.campaign.count({ where: whereClause }),
+      prisma.campaign.count({ where: { ...whereClause, status: 'ACTIVE' } }),
+      prisma.campaign.count({ where: { ...whereClause, status: 'CONVERTED' } }),
+      prisma.campaign.count({ where: { ...whereClause, status: 'CANCELLED' } }),
+      prisma.campaign.count({ where: { ...whereClause, status: 'FAILED' } }),
+      prisma.campaign.count({ where: { ...whereClause, status: 'COMPLETED' } }),
+    ]);
+
+    // Get action funnel for campaigns
+    const campaigns = await prisma.campaign.findMany({
+      where: whereClause,
+      select: { id: true },
+    });
+
+    const campaignIds = campaigns.map((c) => c.id);
+
+    const [
+      actionsPending,
+      actionsScheduled,
+      actionsSent,
+      actionsDelivered,
+      actionsOpened,
+      actionsClicked,
+      actionsConverted,
+      actionsFailed,
+    ] = await Promise.all([
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'PENDING' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'SCHEDULED' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'SENT' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'DELIVERED' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'OPENED' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'CLICKED' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'CONVERTED' },
+      }),
+      prisma.campaignAction.count({
+        where: { campaignId: { in: campaignIds }, status: 'FAILED' },
+      }),
+    ]);
+
+    // Calculate conversion rates
+    const campaignConversionRate = triggered > 0 ? (converted / triggered) * 100 : 0;
+    const emailOpenRate = actionsDelivered > 0 ? (actionsOpened / actionsDelivered) * 100 : 0;
+    const emailClickRate = actionsDelivered > 0 ? (actionsClicked / actionsDelivered) * 100 : 0;
+
+    res.json({
+      period: {
+        days: parseInt(days as string),
+        startDate: startDate.toISOString(),
+        endDate: new Date().toISOString(),
+      },
+      campaignFunnel: {
+        triggered,
+        active,
+        converted,
+        cancelled,
+        failed,
+        completed,
+        conversionRate: parseFloat(campaignConversionRate.toFixed(2)),
+      },
+      actionFunnel: {
+        pending: actionsPending,
+        scheduled: actionsScheduled,
+        sent: actionsSent,
+        delivered: actionsDelivered,
+        opened: actionsOpened,
+        clicked: actionsClicked,
+        converted: actionsConverted,
+        failed: actionsFailed,
+        emailOpenRate: parseFloat(emailOpenRate.toFixed(2)),
+        emailClickRate: parseFloat(emailClickRate.toFixed(2)),
+      },
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to get funnel data');
+    res.status(500).json({ error: 'Failed to get funnel data' });
+  }
+});
+
+/**
+ * GET /api/retention/analytics/metrics
+ * Get aggregated campaign metrics
+ */
+router.get('/analytics/metrics', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { strategyId, periodType = 'DAILY', limit = '30' } = req.query;
+
+    const metrics = await prisma.campaignMetrics.findMany({
+      where: {
+        organizationId,
+        ...(strategyId && { strategyId: strategyId as string }),
+        periodType: periodType as any,
+      },
+      orderBy: { period: 'desc' },
+      take: parseInt(limit as string),
+    });
+
+    res.json(metrics);
+  } catch (error) {
+    log.error({ error }, 'Failed to get metrics');
+    res.status(500).json({ error: 'Failed to get metrics' });
+  }
+});
+
+/**
+ * POST /api/retention/analytics/aggregate
+ * Manually trigger metrics aggregation (admin only)
+ */
+router.post('/analytics/aggregate', async (req: Request, res: Response) => {
+  try {
+    const { period, periodType = 'DAILY' } = req.body;
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const periodDate = period ? new Date(period) : new Date();
+
+    await aggregateOrganizationMetrics(organizationId, periodDate, periodType as any);
+
+    res.json({ success: true, message: 'Metrics aggregated successfully' });
+  } catch (error) {
+    log.error({ error }, 'Failed to aggregate metrics');
+    res.status(500).json({ error: 'Failed to aggregate metrics' });
+  }
+});
+
+// ============================================================================
+// ROI CALCULATOR
+// ============================================================================
+
+/**
+ * GET /api/retention/roi
+ * Calculate ROI for retention campaigns
+ */
+router.get('/roi', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { startDate, endDate, emailCost, discountMultiplier, laborCost } = req.query;
+
+    // Default to last 30 days
+    const end = endDate ? new Date(endDate as string) : new Date();
+    const start = startDate ? new Date(startDate as string) : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const config = {
+      emailCostCents: emailCost ? parseInt(emailCost as string) : undefined,
+      discountCostMultiplier: discountMultiplier ? parseFloat(discountMultiplier as string) : undefined,
+      laborCostPerHourCents: laborCost ? parseInt(laborCost as string) : undefined,
+    };
+
+    const { calculateROI } = await import('./roi-calculator.js');
+    const metrics = await calculateROI(organizationId, start, end, config);
+
+    res.json(metrics);
+  } catch (error) {
+    log.error({ error }, 'Failed to calculate ROI');
+    res.status(500).json({ error: 'Failed to calculate ROI' });
+  }
+});
+
+/**
+ * GET /api/retention/roi/strategy/:strategyId
+ * Calculate ROI for a specific strategy
+ */
+router.get('/roi/strategy/:strategyId', async (req: Request, res: Response) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const end = endDate ? new Date(endDate as string) : new Date();
+    const start = startDate ? new Date(startDate as string) : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const { calculateStrategyROI } = await import('./roi-calculator.js');
+    const result = await calculateStrategyROI(req.params.strategyId, start, end);
+
+    res.json(result);
+  } catch (error) {
+    log.error({ error }, 'Failed to calculate strategy ROI');
+    res.status(500).json({ error: 'Failed to calculate strategy ROI' });
+  }
+});
+
+/**
+ * GET /api/retention/roi/trends
+ * Get ROI trends over time
+ */
+router.get('/roi/trends', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { periodType = 'month', periods = '12' } = req.query;
+
+    const { getROITrends } = await import('./roi-calculator.js');
+    const trends = await getROITrends(
+      organizationId,
+      periodType as 'day' | 'week' | 'month',
+      parseInt(periods as string)
+    );
+
+    res.json({ trends });
+  } catch (error) {
+    log.error({ error }, 'Failed to get ROI trends');
+    res.status(500).json({ error: 'Failed to get ROI trends' });
+  }
+});
+
+/**
+ * GET /api/retention/roi/projection
+ * Project future ROI based on current trends
+ */
+router.get('/roi/projection', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { monthsAhead = '12' } = req.query;
+
+    const { projectROI } = await import('./roi-calculator.js');
+    const projection = await projectROI(organizationId, parseInt(monthsAhead as string));
+
+    res.json(projection);
+  } catch (error) {
+    log.error({ error }, 'Failed to project ROI');
+    res.status(500).json({ error: 'Failed to project ROI' });
+  }
+});
+
+// ============================================================================
+// COHORT ANALYSIS
+// ============================================================================
+
+/**
+ * GET /api/retention/cohorts
+ * Analyze campaigns by cohort
+ */
+router.get('/cohorts', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const {
+      period = 'month',
+      cohortsBack = '12',
+      maxAgeDays = '30',
+      triggerType,
+      strategyId,
+    } = req.query;
+
+    const { analyzeCohorts } = await import('./cohort-analysis.js');
+    const analysis = await analyzeCohorts(organizationId, {
+      period: period as any,
+      cohortsBack: parseInt(cohortsBack as string),
+      maxAgeDays: parseInt(maxAgeDays as string),
+      triggerType: triggerType as string,
+      strategyId: strategyId as string,
+    });
+
+    res.json(analysis);
+  } catch (error) {
+    log.error({ error }, 'Failed to analyze cohorts');
+    res.status(500).json({ error: 'Failed to analyze cohorts' });
+  }
+});
+
+/**
+ * GET /api/retention/cohorts/retention-curve
+ * Get cohort retention curve
+ */
+router.get('/cohorts/retention-curve', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { period = 'month', maxAgeDays = '30' } = req.query;
+
+    const { getCohortRetentionCurve } = await import('./cohort-analysis.js');
+    const curve = await getCohortRetentionCurve(
+      organizationId,
+      period as any,
+      parseInt(maxAgeDays as string)
+    );
+
+    res.json(curve);
+  } catch (error) {
+    log.error({ error }, 'Failed to get retention curve');
+    res.status(500).json({ error: 'Failed to get retention curve' });
+  }
+});
+
+/**
+ * GET /api/retention/cohorts/compare-strategies
+ * Compare cohort performance across strategies
+ */
+router.get('/cohorts/compare-strategies', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { period = 'month', strategies } = req.query;
+
+    if (!strategies) {
+      return res.status(400).json({ error: 'Strategies parameter required' });
+    }
+
+    const strategyIds = (strategies as string).split(',');
+
+    const { compareCohortsByStrategy } = await import('./cohort-analysis.js');
+    const comparison = await compareCohortsByStrategy(
+      organizationId,
+      period as any,
+      strategyIds
+    );
+
+    res.json(comparison);
+  } catch (error) {
+    log.error({ error }, 'Failed to compare cohorts by strategy');
+    res.status(500).json({ error: 'Failed to compare cohorts by strategy' });
+  }
+});
+
+/**
+ * GET /api/retention/cohorts/funnel
+ * Get cohort funnel analysis
+ */
+router.get('/cohorts/funnel', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'startDate and endDate required' });
+    }
+
+    const { getCohortFunnel } = await import('./cohort-analysis.js');
+    const funnel = await getCohortFunnel(
+      organizationId,
+      new Date(startDate as string),
+      new Date(endDate as string)
+    );
+
+    res.json(funnel);
+  } catch (error) {
+    log.error({ error }, 'Failed to get cohort funnel');
+    res.status(500).json({ error: 'Failed to get cohort funnel' });
+  }
+});
+
+// ============================================================================
+// EMAIL TEMPLATES
+// ============================================================================
+
+/**
+ * POST /api/retention/templates
+ * Create a new email template
+ */
+router.post('/templates', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const template = await createEmailTemplate({
+      organizationId,
+      ...req.body,
+    });
+
+    res.status(201).json(template);
+  } catch (error) {
+    log.error({ error }, 'Failed to create template');
+    res.status(500).json({ error: 'Failed to create template' });
+  }
+});
+
+/**
+ * GET /api/retention/templates
+ * List email templates
+ */
+router.get('/templates', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { category, status } = req.query;
+
+    const templates = await prisma.emailTemplate.findMany({
+      where: {
+        organizationId,
+        ...(category && { category: category as any }),
+        ...(status && { status: status as any }),
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    res.json(templates);
+  } catch (error) {
+    log.error({ error }, 'Failed to list templates');
+    res.status(500).json({ error: 'Failed to list templates' });
+  }
+});
+
+/**
+ * GET /api/retention/templates/:id
+ * Get a single template
+ */
+router.get('/templates/:id', async (req: Request, res: Response) => {
+  try {
+    const template = await prisma.emailTemplate.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    if (template.organizationId !== req.user?.organizationId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    res.json(template);
+  } catch (error) {
+    log.error({ error }, 'Failed to get template');
+    res.status(500).json({ error: 'Failed to get template' });
+  }
+});
+
+/**
+ * PUT /api/retention/templates/:id
+ * Update a template
+ */
+router.put('/templates/:id', async (req: Request, res: Response) => {
+  try {
+    const template = await updateEmailTemplate(req.params.id, req.body);
+    res.json(template);
+  } catch (error) {
+    log.error({ error }, 'Failed to update template');
+    res.status(500).json({ error: 'Failed to update template' });
+  }
+});
+
+/**
+ * DELETE /api/retention/templates/:id
+ * Delete a template
+ */
+router.delete('/templates/:id', async (req: Request, res: Response) => {
+  try {
+    await prisma.emailTemplate.delete({
+      where: { id: req.params.id },
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    log.error({ error }, 'Failed to delete template');
+    res.status(500).json({ error: 'Failed to delete template' });
+  }
+});
+
+// ============================================================================
+// A/B TESTING
+// ============================================================================
+
+/**
+ * POST /api/retention/ab-tests
+ * Create a new A/B test for email templates
+ */
+router.post('/ab-tests', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { createABTest } = await import('./ab-testing.js');
+    const result = await createABTest(organizationId, req.body);
+
+    res.status(201).json(result);
+  } catch (error) {
+    log.error({ error }, 'Failed to create A/B test');
+    res.status(500).json({ error: 'Failed to create A/B test' });
+  }
+});
+
+/**
+ * GET /api/retention/ab-tests
+ * List all active A/B tests
+ */
+router.get('/ab-tests', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { listABTests } = await import('./ab-testing.js');
+    const tests = await listABTests(organizationId);
+
+    res.json({ tests });
+  } catch (error) {
+    log.error({ error }, 'Failed to list A/B tests');
+    res.status(500).json({ error: 'Failed to list A/B tests' });
+  }
+});
+
+/**
+ * GET /api/retention/ab-tests/:controlTemplateId/results
+ * Get A/B test results with statistical analysis
+ */
+router.get('/ab-tests/:controlTemplateId/results', async (req: Request, res: Response) => {
+  try {
+    const { minSampleSize, confidenceLevel } = req.query;
+
+    const { getABTestResults } = await import('./ab-testing.js');
+    const results = await getABTestResults(req.params.controlTemplateId, {
+      minSampleSize: minSampleSize ? parseInt(minSampleSize as string) : undefined,
+      confidenceLevel: confidenceLevel ? parseInt(confidenceLevel as string) : undefined,
+    });
+
+    res.json(results);
+  } catch (error) {
+    log.error({ error }, 'Failed to get A/B test results');
+    res.status(500).json({ error: 'Failed to get A/B test results' });
+  }
+});
+
+/**
+ * POST /api/retention/ab-tests/:variantTemplateId/promote
+ * Promote a winning variant to be the new control
+ */
+router.post('/ab-tests/:variantTemplateId/promote', async (req: Request, res: Response) => {
+  try {
+    const { promoteVariant } = await import('./ab-testing.js');
+    await promoteVariant(req.params.variantTemplateId);
+
+    res.json({ success: true, message: 'Variant promoted successfully' });
+  } catch (error) {
+    log.error({ error }, 'Failed to promote variant');
+    res.status(500).json({ error: 'Failed to promote variant' });
+  }
+});
+
+// ============================================================================
+// SYSTEM / MONITORING
+// ============================================================================
+
+/**
+ * GET /api/retention/queue/stats
+ * Get queue statistics
+ */
+router.get('/queue/stats', async (req: Request, res: Response) => {
+  try {
+    const stats = await getQueueStats();
+    res.json(stats);
+  } catch (error) {
+    log.error({ error }, 'Failed to get queue stats');
+    res.status(500).json({ error: 'Failed to get queue stats' });
+  }
+});
+
+/**
+ * POST /api/retention/jobs/payment-predictions
+ * Manually trigger payment prediction processing for organization
+ */
+router.post('/jobs/payment-predictions', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { daysAhead = 30 } = req.body;
+
+    // Import and run payment prediction processing
+    const { processPaymentPredictions } = await import('./triggers/payment-prediction-trigger.js');
+    const result = await processPaymentPredictions(organizationId, daysAhead);
+
+    res.json({
+      message: 'Payment prediction processing completed',
+      ...result,
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to process payment predictions');
+    res.status(500).json({ error: 'Failed to process payment predictions' });
+  }
+});
+
+/**
+ * POST /api/retention/jobs/daily-metrics
+ * Manually trigger daily metrics aggregation
+ */
+router.post('/jobs/daily-metrics', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await runDailyAggregation();
+
+    res.json({ message: 'Daily metrics aggregation completed' });
+  } catch (error) {
+    log.error({ error }, 'Failed to run daily metrics aggregation');
+    res.status(500).json({ error: 'Failed to run daily metrics aggregation' });
+  }
+});
+
+/**
+ * POST /api/retention/jobs/run-all
+ * Manually trigger all scheduled retention jobs
+ */
+router.post('/jobs/run-all', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { runAllRetentionJobs } = await import('./scheduled-jobs.js');
+    await runAllRetentionJobs();
+
+    res.json({ message: 'All retention jobs completed successfully' });
+  } catch (error) {
+    log.error({ error }, 'Failed to run all retention jobs');
+    res.status(500).json({ error: 'Failed to run all retention jobs' });
+  }
+});
+
+// ============================================================================
+// DEFAULT TEMPLATES & SEEDING
+// ============================================================================
+
+/**
+ * GET /api/retention/templates/defaults
+ * List available default templates
+ */
+router.get('/templates/defaults', async (req: Request, res: Response) => {
+  try {
+    const { listDefaultTemplates, getTemplateCategories } = await import(
+      './templates/seed-templates.js'
+    );
+
+    const templates = listDefaultTemplates();
+    const categories = getTemplateCategories();
+
+    res.json({
+      templates,
+      categories,
+      total: templates.length,
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to list default templates');
+    res.status(500).json({ error: 'Failed to list default templates' });
+  }
+});
+
+/**
+ * POST /api/retention/templates/seed
+ * Seed default templates for organization
+ * Body: { overwrite?: boolean, categories?: string[] }
+ */
+router.post('/templates/seed', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { overwrite, categories } = req.body;
+
+    const { seedDefaultTemplates } = await import('./templates/seed-templates.js');
+    const result = await seedDefaultTemplates(organizationId, {
+      overwrite,
+      categories,
+    });
+
+    res.json({
+      message: 'Templates seeded successfully',
+      ...result,
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to seed templates');
+    res.status(500).json({ error: 'Failed to seed templates' });
+  }
+});
+
+/**
+ * POST /api/retention/templates/seed/:category
+ * Seed templates for a specific category
+ */
+router.post('/templates/seed/:category', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+    const { category } = req.params;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { seedCategoryTemplates } = await import('./templates/seed-templates.js');
+    const result = await seedCategoryTemplates(organizationId, category);
+
+    res.json({
+      message: `${category} templates seeded successfully`,
+      ...result,
+    });
+  } catch (error) {
+    log.error({ error }, 'Failed to seed category templates');
+    res.status(500).json({ error: 'Failed to seed category templates' });
+  }
+});
+
+// ============================================================================
+// EMAIL PREFERENCES & UNSUBSCRIBE
+// ============================================================================
+
+/**
+ * GET /api/retention/preferences/:customerId
+ * Get email preferences for a customer
+ */
+router.get('/preferences/:customerId', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+    const { customerId } = req.params;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { getOrCreateEmailPreferences } = await import('./email-preferences.js');
+    const preferences = await getOrCreateEmailPreferences(customerId, organizationId);
+
+    res.json(preferences);
+  } catch (error) {
+    log.error({ error }, 'Failed to get email preferences');
+    res.status(500).json({ error: 'Failed to get email preferences' });
+  }
+});
+
+/**
+ * PATCH /api/retention/preferences/:customerId
+ * Update email preferences for a customer
+ */
+router.patch('/preferences/:customerId', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+    const { customerId } = req.params;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { updateEmailPreferences } = await import('./email-preferences.js');
+    await updateEmailPreferences(customerId, organizationId, req.body);
+
+    res.json({ message: 'Email preferences updated successfully' });
+  } catch (error) {
+    log.error({ error }, 'Failed to update email preferences');
+    res.status(500).json({ error: 'Failed to update email preferences' });
+  }
+});
+
+/**
+ * POST /api/retention/unsubscribe
+ * Unsubscribe customer from emails
+ * Body: { customerId, organizationId, category?, reason?, source? }
+ */
+router.post('/unsubscribe', async (req: Request, res: Response) => {
+  try {
+    const { unsubscribeCustomer } = await import('./email-preferences.js');
+    await unsubscribeCustomer(req.body);
+
+    res.json({ message: 'Successfully unsubscribed' });
+  } catch (error) {
+    log.error({ error }, 'Failed to unsubscribe customer');
+    res.status(500).json({ error: 'Failed to unsubscribe' });
+  }
+});
+
+/**
+ * GET /api/retention/unsubscribe/:token
+ * One-click unsubscribe using token (public endpoint)
+ * Query: ?category=CHURN_PREVENTION (optional)
+ */
+router.get('/unsubscribe/:token', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.params;
+    const { category } = req.query;
+
+    const { unsubscribeByToken } = await import('./email-preferences.js');
+    await unsubscribeByToken(token, category as any, {
+      userAgent: req.headers['user-agent'],
+      ipAddress: req.ip,
+    });
+
+    // Return simple success page
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Unsubscribed - RevenuePlug</title>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              max-width: 600px;
+              margin: 100px auto;
+              padding: 20px;
+              text-align: center;
+            }
+            h1 { color: #2563eb; }
+            p { color: #64748b; line-height: 1.6; }
+            a { color: #2563eb; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+          </style>
+        </head>
+        <body>
+          <h1>✓ Successfully Unsubscribed</h1>
+          <p>You've been unsubscribed ${category ? `from ${category.toLowerCase().replace('_', ' ')} emails` : 'from all emails'}.</p>
+          <p><a href="/email-preferences?token=${token}">Manage your email preferences</a></p>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    log.error({ error }, 'Failed to unsubscribe by token');
+    res.status(400).send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Error - RevenuePlug</title>
+          <style>
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              max-width: 600px;
+              margin: 100px auto;
+              padding: 20px;
+              text-align: center;
+            }
+            h1 { color: #dc2626; }
+            p { color: #64748b; }
+          </style>
+        </head>
+        <body>
+          <h1>⚠ Invalid Token</h1>
+          <p>This unsubscribe link is invalid or has expired.</p>
+        </body>
+      </html>
+    `);
+  }
+});
+
+/**
+ * POST /api/retention/resubscribe/:customerId
+ * Resubscribe customer to all emails
+ */
+router.post('/resubscribe/:customerId', async (req: Request, res: Response) => {
+  try {
+    const organizationId = req.user?.organizationId;
+    const { customerId } = req.params;
+
+    if (!organizationId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { resubscribeCustomer } = await import('./email-preferences.js');
+    await resubscribeCustomer(customerId, organizationId);
+
+    res.json({ message: 'Successfully resubscribed' });
+  } catch (error) {
+    log.error({ error }, 'Failed to resubscribe customer');
+    res.status(500).json({ error: 'Failed to resubscribe' });
+  }
+});
+
+export default router;
