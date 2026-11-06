@@ -1,0 +1,141 @@
+# this is the AlertManager Configuration for RevenuePlug and it routes alerts to Slack, Email, PagerDuty, etc.
+
+global:
+  resolve_timeout: 5m
+
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+route:
+
+  receiver: 'default'
+
+
+  group_by: ['alertname', 'cluster', 'service']
+
+
+  group_wait: 30s
+
+
+  group_interval: 5m
+
+
+  repeat_interval: 4h
+
+
+  routes:
+
+    - match:
+        severity: critical
+      receiver: 'pagerduty'
+      continue: true
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 30m
+
+
+    - match:
+        component: clickhouse
+      receiver: 'clickhouse-team'
+      group_wait: 30s
+      group_interval: 5m
+
+
+    - match:
+        component: system
+      receiver: 'devops-team'
+
+
+    - match:
+        component: pipeline
+      receiver: 'data-team'
+      group_wait: 10s
+
+inhibit_rules:
+
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
+
+
+  - source_match:
+      alertname: 'ContainerDown'
+    target_match:
+      alertname: 'ClickHouseReplicationLag'
+    equal: ['instance']
+
+receivers:
+
+  - name: 'default'
+    slack_configs:
+      - channel: '#alerts'
+        username: 'AlertManager'
+        icon_emoji: ':warning:'
+        title: '{{ .GroupLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+            *Alert:* {{ .Annotations.summary }}
+            *Description:* {{ .Annotations.description }}
+            *Severity:* {{ .Labels.severity }}
+            *Instance:* {{ .Labels.instance }}
+            {{ if .Annotations.runbook }}*Runbook:* {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+        send_resolved: true
+
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        severity: '{{ .GroupLabels.severity }}'
+        description: '{{ .GroupLabels.alertname }}: {{ .Annotations.summary }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+          instance: '{{ .GroupLabels.instance }}'
+
+  - name: 'clickhouse-team'
+    slack_configs:
+      - channel: '#clickhouse-alerts'
+        username: 'ClickHouse Monitor'
+        icon_emoji: ':chart_with_upwards_trend:'
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: '[{{ .Status | toUpper }}] ClickHouse Alert'
+        text: >-
+          {{ range .Alerts }}
+            *Alert:* {{ .Annotations.summary }}
+            *Description:* {{ .Annotations.description }}
+            *Runbook:* {{ .Annotations.runbook }}
+            *Severity:* {{ .Labels.severity }}
+            *Instance:* {{ .Labels.instance }}
+          {{ end }}
+        send_resolved: true
+
+  - name: 'devops-team'
+    slack_configs:
+      - channel: '#devops-alerts'
+        send_resolved: true
+    email_configs:
+      - to: 'devops@revenueplug.com'
+        from: 'alertmanager@revenueplug.com'
+        smarthost: 'smtp.gmail.com:587'
+        auth_username: '${SMTP_USERNAME}'
+        auth_password: '${SMTP_PASSWORD}'
+        headers:
+          Subject: '[{{ .Status }}] System Alert: {{ .GroupLabels.alertname }}'
+
+  - name: 'data-team'
+    slack_configs:
+      - channel: '#data-pipeline-alerts'
+        username: 'Pipeline Monitor'
+        icon_emoji: ':pipeline:'
+        send_resolved: true
+
+  - name: 'webhook'
+    webhook_configs:
+      - url: 'http://api:8000/webhooks/alerts'
+        send_resolved: true
+        http_config:
+          bearer_token: '${WEBHOOK_TOKEN}'

@@ -1,0 +1,1782 @@
+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+model Organization {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  email    String?
+  settings Json?
+
+
+  stripeCustomerId       String?                  @unique @map("stripe_customer_id")
+  stripeSubscriptionId   String?                  @unique @map("stripe_subscription_id")
+  stripePriceId          String?                  @map("stripe_price_id")
+  billingStatus          BillingStatus?           @default(FREE) @map("billing_status")
+  currentPeriodStart     DateTime?                @map("current_period_start")
+  currentPeriodEnd       DateTime?                @map("current_period_end")
+  cancelAtPeriodEnd      Boolean                  @default(false) @map("cancel_at_period_end")
+  trialEnd               DateTime?                @map("trial_end")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+
+  members           OrganizationMember[]
+  connections       Connection[]
+  usageTracking     UsageTracking[]
+  billingEvents     BillingWebhookEvent[]
+  recoveryCredit    FirstRecoveryCredit?
+  retentionStrategies RetentionStrategy[]
+  campaigns         Campaign[]
+  emailTemplates    EmailTemplate[]
+  campaignMetrics   CampaignMetrics[]
+  emailPreferences  EmailPreference[]
+  campaignSchedules CampaignSchedule[]
+  zapierWebhooks    ZapierWebhook[]
+  auditLogs         AuditLog[]
+  organizationSettings OrganizationSettings?
+  outgoingWebhooks  OutgoingWebhook[]
+  apiKeys           APIKey[]
+
+  @@index([slug])
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String           @id @default(cuid())
+  organizationId String           @map("organization_id")
+  userId         String           @map("user_id")
+  role           OrganizationRole
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([organizationId])
+  @@index([role])
+  @@map("organization_members")
+}
+
+model Connection {
+  id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  platform Platform         @map("platform")
+  authType AuthType         @map("auth_type")
+  status   ConnectionStatus @default(ACTIVE)
+
+
+
+
+  credentials Json
+
+
+
+  metadata Json?
+
+
+  lastSyncedAt DateTime? @map("last_synced_at")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+
+  subscriptions Subscription[]
+  customers     Customer[]
+  payments      Payment[]
+  invoices      Invoice[]
+
+  @@unique([organizationId, platform])
+  @@index([organizationId])
+  @@index([platform])
+  @@index([status])
+  @@map("connections")
+}
+
+model UsageTracking {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  period         DateTime
+
+
+  apiCalls    Int @default(0) @map("api_calls")
+  emailsSent  Int @default(0) @map("emails_sent")
+  connections Int @default(0)
+
+
+  lastUpdatedAt DateTime @updatedAt @map("last_updated_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  @@unique([organizationId, period])
+  @@index([organizationId])
+  @@index([period])
+  @@map("usage_tracking")
+}
+
+model BillingWebhookEvent {
+  id             String    @id @default(cuid())
+  organizationId String?   @map("organization_id")
+  stripeEventId  String    @unique @map("stripe_event_id")
+  eventType      String    @map("event_type")
+  processed      Boolean   @default(false)
+  processedAt    DateTime? @map("processed_at")
+  error          String?
+  payload        Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([stripeEventId])
+  @@index([organizationId])
+  @@index([eventType])
+  @@index([processed])
+  @@map("billing_webhook_events")
+}
+
+model FirstRecoveryCredit {
+  id             String       @id @default(cuid())
+  organizationId String       @unique @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  paymentExternalId  String   @map("payment_external_id")
+  customerExternalId String   @map("customer_external_id")
+  recoveredAmount    Decimal  @map("recovered_amount")
+  platform           Platform
+
+
+  creditAmount Int                       @default(1000) @map("credit_amount")
+  status       FirstRecoveryCreditStatus @default(PENDING)
+
+
+  stripeCreditBalanceTransactionId String?   @unique @map("stripe_credit_balance_transaction_id")
+  appliedAt                        DateTime? @map("applied_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("first_recovery_credits")
+}
+
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  password        String?
+  name            String?
+
+
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+
+
+  pendingEmail    String?   @map("pending_email")
+
+
+  deletedAt       DateTime? @map("deleted_at")
+  deleteToken     String?   @map("delete_token")
+
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+
+  sessions                Session[]
+  verificationTokens      VerificationToken[]
+  oauthAccounts           OAuthAccount[]
+  organizationMemberships OrganizationMember[]
+  notificationPreference  UserNotificationPreference?
+  mfa                     UserMFA?
+
+  @@index([email])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+
+  refreshToken String   @unique @map("refresh_token")
+  expiresAt    DateTime @map("expires_at")
+
+
+  ipAddress    String?  @map("ip_address")
+  userAgent    String?  @map("user_agent")
+  device       String?
+  location     String?
+
+
+  createdAt    DateTime @default(now()) @map("created_at")
+  lastUsedAt   DateTime @default(now()) @map("last_used_at")
+
+  @@index([userId])
+  @@index([refreshToken])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  id        String                 @id @default(cuid())
+  userId    String                 @map("user_id")
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+
+  token     String                 @unique
+  type      VerificationTokenType
+
+
+  expiresAt DateTime               @map("expires_at")
+  usedAt    DateTime?              @map("used_at")
+
+  createdAt DateTime               @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("verification_tokens")
+}
+
+model OAuthAccount {
+  id                String        @id @default(cuid())
+  userId            String        @map("user_id")
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+
+  provider          OAuthProvider
+  providerAccountId String        @map("provider_account_id")
+
+
+  accessToken       String?       @map("access_token")
+  refreshToken      String?       @map("refresh_token")
+  expiresAt         DateTime?     @map("expires_at")
+
+
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("oauth_accounts")
+}
+
+enum OAuthProvider {
+  GOOGLE
+  SLACK
+  MICROSOFT
+
+  @@map("oauth_provider")
+}
+
+model UserMFA {
+  id             String    @id @default(cuid())
+  userId         String    @unique @map("user_id")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+
+  secret         String
+
+
+  enabled        Boolean   @default(false)
+  verifiedAt     DateTime? @map("verified_at")
+  lastUsedAt     DateTime? @map("last_used_at")
+
+
+  recoveryCodes  String[]  @map("recovery_codes")
+
+
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("user_mfa")
+}
+
+
+model Customer {
+  id           String     @id @default(cuid())
+  connectionId String     @map("connection_id")
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+
+  externalId String  @map("external_id")
+  email      String?
+  name       String?
+
+
+  platform Platform
+
+
+  rawData Json @map("raw_data")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+
+  subscriptions        Subscription[]
+  healthScores         CustomerHealthScore[]
+  churnRiskScores      ChurnRiskScore[]
+  campaigns            Campaign[]
+  campaignCooldowns    CampaignCooldown[]
+  emailPreferences     EmailPreference[]
+
+
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([email])
+  @@map("customers")
+}
+
+model Subscription {
+  id           String     @id @default(cuid())
+  connectionId String     @map("connection_id")
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+
+  externalId       String             @map("external_id")
+  status           SubscriptionStatus
+  currentPeriodEnd DateTime           @map("current_period_end")
+
+
+  amount   Decimal
+  currency String
+
+
+  trialEnd      DateTime? @map("trial_end")
+  cancelledAt   DateTime? @map("cancelled_at")
+  cancelAtEnd   Boolean   @default(false) @map("cancel_at_end")
+  productName   String?   @map("product_name")
+  productId     String?   @map("product_id")
+  interval      String?
+  intervalCount Int?      @default(1) @map("interval_count")
+
+
+  platform Platform
+
+
+  rawData Json @map("raw_data")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([customerId])
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+model Payment {
+  id           String     @id @default(cuid())
+  connectionId String     @map("connection_id")
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+
+  externalId String        @map("external_id")
+  status     PaymentStatus
+
+
+  amount   Decimal
+  currency String
+
+
+  subscriptionExternalId String?   @map("subscription_external_id")
+  customerExternalId     String?   @map("customer_external_id")
+  failureReason          String?   @map("failure_reason")
+  paidAt                 DateTime? @map("paid_at")
+  refundedAt             DateTime? @map("refunded_at")
+  refundedAmount         Decimal?  @map("refunded_amount")
+
+
+  platform Platform
+
+
+  rawData Json @map("raw_data")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([status])
+  @@index([subscriptionExternalId])
+  @@index([customerExternalId])
+  @@index([paidAt])
+  @@map("payments")
+}
+
+model Invoice {
+  id           String     @id @default(cuid())
+  connectionId String     @map("connection_id")
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+
+  externalId String        @map("external_id")
+  status     InvoiceStatus
+
+
+  subscriptionExternalId String? @map("subscription_external_id")
+  customerExternalId     String? @map("customer_external_id")
+
+
+  amountDue       Decimal  @map("amount_due")
+  amountPaid      Decimal  @default(0) @map("amount_paid")
+  amountRemaining Decimal  @map("amount_remaining")
+  currency        String
+
+
+  dueDate            DateTime? @map("due_date")
+  paidAt             DateTime? @map("paid_at")
+  nextPaymentAttempt DateTime? @map("next_payment_attempt")
+
+
+  attemptCount  Int     @default(0) @map("attempt_count")
+  failureReason String? @map("failure_reason")
+
+
+  hostedInvoiceUrl String? @map("hosted_invoice_url")
+  invoicePdf       String? @map("invoice_pdf")
+
+
+  platform Platform
+
+
+  rawData Json @map("raw_data")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([connectionId, externalId])
+  @@index([connectionId])
+  @@index([status])
+  @@index([subscriptionExternalId])
+  @@index([customerExternalId])
+  @@index([dueDate])
+  @@index([nextPaymentAttempt])
+  @@map("invoices")
+}
+
+
+model EventOutbox {
+  id String @id @default(cuid())
+
+
+  eventType      String   @map("event_type")
+  organizationId String   @map("organization_id")
+  platform       Platform
+
+
+  payload Json
+
+
+  published   Boolean   @default(false)
+  publishedAt DateTime? @map("published_at")
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  createdAt DateTime @default(now())
+
+  @@index([published])
+  @@index([createdAt])
+  @@index([organizationId])
+  @@map("event_outbox")
+}
+
+
+enum Platform {
+  STRIPE
+  POLAR
+  REVENUECAT
+  LEMON_SQUEEZY
+
+  @@map("platform")
+}
+
+enum AuthType {
+  OAUTH
+  API_KEY
+  WEBHOOK_ONLY
+
+  @@map("auth_type")
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  FAILED
+  DISCONNECTED
+
+  @@map("connection_status")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  PAST_DUE
+  TRIALING
+  PAUSED
+  INCOMPLETE
+  UNPAID
+
+  @@map("subscription_status")
+}
+
+enum PaymentStatus {
+  SUCCEEDED
+  FAILED
+  PENDING
+  REFUNDED
+  PARTIALLY_REFUNDED
+
+  @@map("payment_status")
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+
+  @@map("invoice_status")
+}
+
+
+model WebhookEvent {
+  id        String   @id @default(cuid())
+
+
+  stripeEventId String   @unique @map("stripe_event_id")
+  eventType     String   @map("event_type")
+
+
+  connectionId String? @map("connection_id")
+
+
+  status       WebhookEventStatus @default(PENDING)
+  processedAt  DateTime?          @map("processed_at")
+  errorMessage String?            @map("error_message")
+
+
+  payload Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([stripeEventId])
+  @@index([eventType])
+  @@index([connectionId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("webhook_events")
+}
+
+enum WebhookEventStatus {
+  PENDING
+  PROCESSED
+  FAILED
+
+  @@map("webhook_event_status")
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+
+  @@map("verification_token_type")
+}
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+
+  @@map("organization_role")
+}
+
+enum BillingStatus {
+  FREE
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  UNPAID
+
+  @@map("billing_status")
+}
+
+enum FirstRecoveryCreditStatus {
+  PENDING
+  APPLIED
+  EXPIRED
+
+  @@map("first_recovery_credit_status")
+}
+
+
+model EnterpriseLead {
+  id String @id @default(cuid())
+
+
+  name            String
+  email           String
+  company         String
+  jobTitle        String?  @map("job_title")
+  phone           String?
+  website         String?
+  linkedinUrl     String?  @map("linkedin_url")
+
+
+  monthlyRevenue       Int?     @map("monthly_revenue")
+  customerCount        Int?     @map("customer_count")
+  platformsUsed        String[] @map("platforms_used")
+  currentFailureRate   Float?   @map("current_failure_rate")
+  estimatedAtRisk      Int?     @map("estimated_at_risk")
+
+
+  qualificationScore Int                  @default(0) @map("qualification_score")
+  qualificationTier  LeadQualificationTier @map("qualification_tier")
+  isQualified        Boolean              @default(false) @map("is_qualified")
+
+
+  source     LeadSource @default(CONTACT_FORM)
+  utmSource  String?    @map("utm_source")
+  utmMedium  String?    @map("utm_medium")
+  utmCampaign String?   @map("utm_campaign")
+  referrer   String?
+
+
+  message             String? @db.Text
+  interestedFeatures  String[] @map("interested_features")
+  timeline            String?
+  hasExistingAccount  Boolean  @default(false) @map("has_existing_account")
+  organizationId      String?  @map("organization_id")
+
+
+  status              LeadStatus            @default(NEW)
+  assignedTo          String?               @map("assigned_to")
+  scheduledCallAt     DateTime?             @map("scheduled_call_at")
+  proposalSentAt      DateTime?             @map("proposal_sent_at")
+  contractSentAt      DateTime?             @map("contract_sent_at")
+  closedAt            DateTime?             @map("closed_at")
+  closedReason        String?               @map("closed_reason")
+
+
+  estimatedDealValue  Int?     @map("estimated_deal_value")
+  proposedPricing     Json?    @map("proposed_pricing")
+
+
+  notes               String? @db.Text
+  communicationLog    Json[]  @default([]) @map("communication_log")
+
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([email])
+  @@index([status])
+  @@index([qualificationTier])
+  @@index([isQualified])
+  @@index([createdAt])
+  @@index([organizationId])
+  @@map("enterprise_leads")
+}
+
+enum LeadQualificationTier {
+  HOT
+  WARM
+  COLD
+  UNQUALIFIED
+
+  @@map("lead_qualification_tier")
+}
+
+enum LeadSource {
+  CONTACT_FORM
+  IN_APP_UPGRADE
+  BLOCKED_CHECKOUT
+  REFERRAL
+  WEBSITE
+  WEBINAR
+  CONFERENCE
+  OUTBOUND
+
+  @@map("lead_source")
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  DEMO_SCHEDULED
+  DEMO_COMPLETED
+  PROPOSAL_SENT
+  NEGOTIATION
+  CONTRACT_SENT
+  CLOSED_WON
+  CLOSED_LOST
+  NURTURE
+
+  @@map("lead_status")
+}
+
+
+model CustomerHealthScore {
+  id         String   @id @default(cuid())
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+
+  score Int
+
+
+  paymentHealthScore     Int @map("payment_health_score")
+  engagementScore        Int @map("engagement_score")
+  usageScore             Int @map("usage_score")
+  subscriptionHealthScore Int @map("subscription_health_score")
+  supportScore           Int @map("support_score")
+
+
+  riskLevel    HealthRiskLevel @map("risk_level")
+  riskFactors  String[]        @map("risk_factors")
+
+
+  trend        ScoreTrend
+  previousScore Int?           @map("previous_score")
+  scoreChange   Int?           @map("score_change")
+
+
+  calculatedAt DateTime @default(now()) @map("calculated_at")
+  expiresAt    DateTime @map("expires_at")
+
+
+  breakdown Json?
+
+  @@index([customerId])
+  @@index([score])
+  @@index([riskLevel])
+  @@index([calculatedAt])
+  @@map("customer_health_scores")
+}
+
+model ChurnRiskScore {
+  id         String   @id @default(cuid())
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+
+  score Int
+
+
+  riskLevel ChurnRiskLevel @map("risk_level")
+
+
+  paymentFailureRisk    Int @map("payment_failure_risk")
+  engagementDeclineRisk Int @map("engagement_decline_risk")
+  usageDeclineRisk      Int @map("usage_decline_risk")
+  supportIssueRisk      Int @map("support_issue_risk")
+
+
+  churnSignals String[] @map("churn_signals")
+
+
+  predictedChurnDate    DateTime? @map("predicted_churn_date")
+  churnProbability      Float     @map("churn_probability")
+  daysUntilPredictedChurn Int?    @map("days_until_predicted_churn")
+
+
+  recommendedActions String[] @map("recommended_actions")
+  priority           ActionPriority
+
+
+  calculatedAt DateTime @default(now()) @map("calculated_at")
+  expiresAt    DateTime @map("expires_at")
+
+
+  previousScore Int?       @map("previous_score")
+  trend         ScoreTrend
+
+  @@index([customerId])
+  @@index([riskLevel])
+  @@index([score])
+  @@index([calculatedAt])
+  @@index([priority])
+  @@map("churn_risk_scores")
+}
+
+
+model RetentionStrategy {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  name        String
+  description String? @db.Text
+  status      RetentionStrategyStatus @default(ACTIVE)
+
+
+
+  triggerConditions Json @map("trigger_conditions")
+
+
+
+  audienceFilters Json? @map("audience_filters")
+
+
+  actions Json[] @default([])
+
+
+  cooldownDays Int @default(30) @map("cooldown_days")
+  maxActionsPerCustomer Int @default(5) @map("max_actions_per_customer")
+
+
+  priority ActionPriority @default(MEDIUM)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+
+  campaigns Campaign[]
+  cooldowns CampaignCooldown[]
+  metrics   CampaignMetrics[]
+  schedules CampaignSchedule[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("retention_strategies")
+}
+
+model Campaign {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  strategyId String           @map("strategy_id")
+  strategy   RetentionStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+
+  status      CampaignStatus @default(ACTIVE)
+  priority    ActionPriority
+  triggerType CampaignTriggerType @map("trigger_type")
+
+
+
+  triggerContext Json @map("trigger_context")
+
+
+  convertedAt DateTime? @map("converted_at")
+  revenueRecovered Decimal? @map("revenue_recovered") @db.Decimal(10, 2)
+
+
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  cancelledAt DateTime? @map("cancelled_at")
+  cancelReason String?  @map("cancel_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+
+  actions   CampaignAction[]
+  cooldowns CampaignCooldown[]
+
+  @@index([organizationId])
+  @@index([strategyId])
+  @@index([customerId])
+  @@index([status])
+  @@index([triggerType])
+  @@index([startedAt])
+  @@map("campaigns")
+}
+
+
+model CampaignAction {
+  id         String   @id @default(cuid())
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+
+  actionType ActionType @map("action_type")
+  status     CampaignActionStatus @default(PENDING)
+
+
+  delayMinutes Int @default(0) @map("delay_minutes")
+  scheduledFor DateTime @map("scheduled_for")
+
+
+  sequenceId    String?  @map("sequence_id")
+  sequenceStep  Int?     @map("sequence_step")
+  parentActionId String? @map("parent_action_id")
+
+
+  branchCondition     String? @map("branch_condition")
+  branchFromActionId  String? @map("branch_from_action_id")
+
+
+
+
+
+  actionData Json @map("action_data")
+
+
+  executedAt DateTime? @map("executed_at")
+  executionResult Json?   @map("execution_result")
+
+
+
+  errorMessage String? @map("error_message")
+  retryCount   Int     @default(0) @map("retry_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([campaignId])
+  @@index([status])
+  @@index([scheduledFor])
+  @@index([actionType])
+  @@map("campaign_actions")
+}
+
+
+
+model EmailTemplate {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  name        String
+  description String? @db.Text
+  category    EmailTemplateCategory
+  status      EmailTemplateStatus @default(ACTIVE)
+
+
+  subject     String
+  htmlBody    String  @db.Text @map("html_body")
+  textBody    String? @db.Text @map("text_body")
+
+
+
+  availableTags String[] @map("available_tags")
+
+
+  variantOf   String?  @map("variant_of")
+  variantName String?  @map("variant_name")
+
+
+  sentCount       Int @default(0) @map("sent_count")
+  openRate        Float? @map("open_rate")
+  clickRate       Float? @map("click_rate")
+  conversionRate  Float? @map("conversion_rate")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([category])
+  @@index([status])
+  @@map("email_templates")
+}
+
+
+
+model CampaignMetrics {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  strategyId String?          @map("strategy_id")
+  strategy   RetentionStrategy? @relation(fields: [strategyId], references: [id], onDelete: SetNull)
+
+
+  period     DateTime
+  periodType MetricPeriod @map("period_type")
+
+
+  totalCampaigns       Int @default(0) @map("total_campaigns")
+  activeCampaigns      Int @default(0) @map("active_campaigns")
+  completedCampaigns   Int @default(0) @map("completed_campaigns")
+  convertedCampaigns   Int @default(0) @map("converted_campaigns")
+  cancelledCampaigns   Int @default(0) @map("cancelled_campaigns")
+
+
+  emailsSent       Int @default(0) @map("emails_sent")
+  discountsCreated Int @default(0) @map("discounts_created")
+  outreachTasks    Int @default(0) @map("outreach_tasks")
+  usageNudges      Int @default(0) @map("usage_nudges")
+
+
+  conversionRate     Float @default(0) @map("conversion_rate")
+  avgTimeToConversion Float? @map("avg_time_to_conversion")
+  totalRevenueRecovered Decimal @default(0) @map("total_revenue_recovered") @db.Decimal(12, 2)
+
+
+  emailOpenRate  Float? @map("email_open_rate")
+  emailClickRate Float? @map("email_click_rate")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([organizationId, strategyId, period, periodType])
+  @@index([organizationId])
+  @@index([period])
+  @@map("campaign_metrics")
+}
+
+
+
+model CampaignCooldown {
+  id         String   @id @default(cuid())
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  strategyId String           @map("strategy_id")
+  strategy   RetentionStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  lastCampaignId String   @map("last_campaign_id")
+  lastCampaign   Campaign @relation(fields: [lastCampaignId], references: [id], onDelete: Cascade)
+
+
+  lastTriggeredAt DateTime @map("last_triggered_at")
+  cooldownEndsAt  DateTime @map("cooldown_ends_at")
+  campaignCount   Int      @default(1) @map("campaign_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([customerId, strategyId])
+  @@index([customerId])
+  @@index([strategyId])
+  @@index([cooldownEndsAt])
+  @@map("campaign_cooldowns")
+}
+
+
+model EmailPreference {
+  id         String   @id @default(cuid())
+  customerId String   @map("customer_id")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  unsubscribedAll Boolean @default(false) @map("unsubscribed_all")
+  unsubscribedAt  DateTime? @map("unsubscribed_at")
+
+
+  churnPreventionEnabled Boolean @default(true) @map("churn_prevention_enabled")
+  paymentRecoveryEnabled Boolean @default(true) @map("payment_recovery_enabled")
+  trialConversionEnabled Boolean @default(true) @map("trial_conversion_enabled")
+  usageNudgesEnabled     Boolean @default(true) @map("usage_nudges_enabled")
+  productUpdatesEnabled  Boolean @default(true) @map("product_updates_enabled")
+  newsMarketingEnabled   Boolean @default(true) @map("news_marketing_enabled")
+
+
+  unsubscribeToken  String?   @unique @map("unsubscribe_token")
+  unsubscribeReason String?   @map("unsubscribe_reason")
+  unsubscribeSource String?   @map("unsubscribe_source")
+  userAgent         String?   @map("user_agent")
+  ipAddress         String?   @map("ip_address")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([customerId, organizationId])
+  @@index([customerId])
+  @@index([organizationId])
+  @@index([unsubscribedAll])
+  @@index([unsubscribeToken])
+  @@map("email_preferences")
+}
+
+
+
+model CampaignSchedule {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  strategyId String           @map("strategy_id")
+  strategy   RetentionStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+
+  name        String
+  description String? @db.Text
+  status      CampaignScheduleStatus @default(ACTIVE)
+
+
+  scheduleType CampaignScheduleType @map("schedule_type")
+
+
+  scheduledAt DateTime? @map("scheduled_at")
+
+
+  cronExpression String? @map("cron_expression")
+  dayOfWeek      Int?    @map("day_of_week")
+  dayOfMonth     Int?    @map("day_of_month")
+  timeOfDay      String? @map("time_of_day")
+
+
+
+  audienceFilters Json? @map("audience_filters")
+
+
+  maxRuns Int? @map("max_runs")
+  runCount Int @default(0) @map("run_count")
+
+
+  nextRunAt DateTime? @map("next_run_at")
+  lastRunAt DateTime? @map("last_run_at")
+  lastRunCampaignCount Int? @map("last_run_campaign_count")
+
+
+  pausedAt DateTime? @map("paused_at")
+  completedAt DateTime? @map("completed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([strategyId])
+  @@index([status])
+  @@index([nextRunAt])
+  @@index([scheduleType])
+  @@map("campaign_schedules")
+}
+
+
+
+model ZapierWebhook {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  eventType String @map("event_type")
+
+
+  targetUrl String @map("target_url")
+
+
+  secret String?
+
+
+  enabled Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([eventType])
+  @@index([enabled])
+  @@map("zapier_webhooks")
+}
+
+
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  userId   String? @map("user_id")
+  userName String? @map("user_name")
+  userEmail String? @map("user_email")
+
+
+  action      AuditAction
+  resource    String
+  resourceId  String?     @map("resource_id")
+  description String      @db.Text
+
+
+  metadata Json?
+
+
+  ipAddress String? @map("ip_address")
+  userAgent String? @map("user_agent") @db.Text
+
+
+  severity AuditSeverity @default(INFO)
+  status   AuditStatus   @default(SUCCESS)
+
+
+  errorMessage String? @map("error_message") @db.Text
+
+
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+
+  retainUntil DateTime? @map("retain_until")
+  archived    Boolean   @default(false)
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([action])
+  @@index([resource])
+  @@index([occurredAt])
+  @@index([severity])
+  @@index([retainUntil])
+  @@index([archived])
+  @@map("audit_logs")
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+enum HealthRiskLevel {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+
+  @@map("health_risk_level")
+}
+
+enum ChurnRiskLevel {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+
+  @@map("churn_risk_level")
+}
+
+enum ScoreTrend {
+  IMPROVING
+  STABLE
+  DECLINING
+
+  @@map("score_trend")
+}
+
+enum ActionPriority {
+  IMMEDIATE
+  HIGH
+  MEDIUM
+  LOW
+
+  @@map("action_priority")
+}
+
+enum BehavioralEventType {
+  LOGIN
+  LOGOUT
+  FEATURE_USED
+  API_CALL
+  PAYMENT_METHOD_UPDATED
+  SETTINGS_CHANGED
+  SUPPORT_TICKET_CREATED
+  EXPORT_DATA
+  INTEGRATION_ADDED
+  TEAM_MEMBER_ADDED
+
+  @@map("behavioral_event_type")
+}
+
+enum MetricType {
+  API_CALLS
+  LOGINS
+  ACTIVE_USERS
+  FEATURE_USAGE
+  DATA_VOLUME
+  INTEGRATIONS
+  SUPPORT_TICKETS
+
+  @@map("metric_type")
+}
+
+enum MetricPeriod {
+  HOURLY
+  DAILY
+  WEEKLY
+  MONTHLY
+
+  @@map("metric_period")
+}
+
+enum MetricTrend {
+  INCREASING
+  STABLE
+  DECREASING
+
+  @@map("metric_trend")
+}
+
+
+
+
+
+enum RetentionStrategyStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+
+  @@map("retention_strategy_status")
+}
+
+enum CampaignStatus {
+  ACTIVE
+  COMPLETED
+  CONVERTED
+  CANCELLED
+  FAILED
+
+  @@map("campaign_status")
+}
+
+enum CampaignTriggerType {
+  CHURN_RISK_HIGH
+  CHURN_RISK_CRITICAL
+  PAYMENT_FAILURE
+  PAYMENT_PREDICTION_HIGH
+  PAYMENT_PREDICTION_CRITICAL
+  TRIAL_ENDING
+  SUBSCRIPTION_CANCELLED
+  USAGE_DECLINING
+  MANUAL
+
+  @@map("campaign_trigger_type")
+}
+
+enum ActionType {
+  EMAIL
+  DISCOUNT
+  PERSONAL_OUTREACH
+  USAGE_NUDGE
+  FEATURE_HIGHLIGHT
+
+  @@map("action_type")
+}
+
+enum CampaignActionStatus {
+  PENDING
+  SCHEDULED
+  EXECUTING
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  CONVERTED
+  FAILED
+  CANCELLED
+
+  @@map("campaign_action_status")
+}
+
+enum EmailTemplateCategory {
+  CHURN_PREVENTION
+  TRIAL_CONVERSION
+  PAYMENT_RECOVERY
+  WIN_BACK
+  ENGAGEMENT
+  FEATURE_EDUCATION
+
+  @@map("email_template_category")
+}
+
+enum EmailTemplateStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+
+  @@map("email_template_status")
+}
+
+enum CampaignScheduleStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+
+  @@map("campaign_schedule_status")
+}
+
+enum CampaignScheduleType {
+  ONE_TIME
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+
+  @@map("campaign_schedule_type")
+}
+
+
+
+
+
+enum AuditAction {
+
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  PASSWORD_RESET
+  PASSWORD_CHANGED
+  EMAIL_VERIFIED
+
+
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  USER_INVITED
+  USER_ROLE_CHANGED
+
+
+  ORGANIZATION_CREATED
+  ORGANIZATION_UPDATED
+  ORGANIZATION_DELETED
+  ORGANIZATION_SETTINGS_CHANGED
+
+
+  CONNECTION_CREATED
+  CONNECTION_UPDATED
+  CONNECTION_DELETED
+  CONNECTION_OAUTH_AUTHORIZED
+
+
+  CAMPAIGN_CREATED
+  CAMPAIGN_UPDATED
+  CAMPAIGN_DELETED
+  CAMPAIGN_STARTED
+  CAMPAIGN_STOPPED
+  CAMPAIGN_CONVERTED
+
+
+  DATA_EXPORTED
+  DATA_IMPORTED
+  DATA_DELETED
+  BULK_DELETE
+
+
+  SETTINGS_UPDATED
+  API_KEY_CREATED
+  API_KEY_DELETED
+  WEBHOOK_CREATED
+  WEBHOOK_DELETED
+
+
+  AUDIT_LOG_EXPORTED
+  AUDIT_LOG_ARCHIVED
+  DATA_RETENTION_APPLIED
+
+
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_UPDATED
+  SUBSCRIPTION_CANCELLED
+  PAYMENT_METHOD_UPDATED
+
+
+  UNAUTHORIZED_ACCESS_ATTEMPT
+  PERMISSION_DENIED
+  SUSPICIOUS_ACTIVITY_DETECTED
+
+  @@map("audit_action")
+}
+
+enum AuditSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+
+  @@map("audit_severity")
+}
+
+enum AuditStatus {
+  SUCCESS
+  FAILURE
+  PENDING
+
+  @@map("audit_status")
+}
+
+
+
+
+
+
+
+model OrganizationSettings {
+  id             String   @id @default(cuid())
+  organizationId String   @unique @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+
+  timezone String @default("UTC")
+  currency String @default("USD")
+  dateFormat String @default("MM/DD/YYYY") @map("date_format")
+  timeFormat String @default("12h") @map("time_format")
+
+
+  fromName String? @map("from_name")
+  fromEmail String? @map("from_email")
+  replyTo String? @map("reply_to")
+  emailFooter String? @map("email_footer") @db.Text
+
+
+  defaultCampaignCooldown Int @default(30) @map("default_campaign_cooldown")
+  maxEmailsPerDay Int @default(10) @map("max_emails_per_day")
+  minDaysBetweenEmails Int @default(1) @map("min_days_between_emails")
+
+
+  notifyHighRiskChurn Boolean @default(true) @map("notify_high_risk_churn")
+  notifyPaymentFailures Boolean @default(true) @map("notify_payment_failures")
+  notifyCampaignConversions Boolean @default(true) @map("notify_campaign_conversions")
+  notifyLowHealthScore Boolean @default(false) @map("notify_low_health_score")
+
+
+  enableABTesting Boolean @default(true) @map("enable_ab_testing")
+  enablePredictiveAnalytics Boolean @default(true) @map("enable_predictive_analytics")
+  enableBehavioralTracking Boolean @default(true) @map("enable_behavioral_tracking")
+
+
+  gdprMode Boolean @default(false) @map("gdpr_mode")
+  dataRetentionDays Int @default(730) @map("data_retention_days")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@map("organization_settings")
+}
+
+
+model UserNotificationPreference {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  emailDigest EmailDigestFrequency @default(DAILY) @map("email_digest")
+  emailOnHighRisk Boolean @default(true) @map("email_on_high_risk")
+  emailOnPaymentFailed Boolean @default(true) @map("email_on_payment_failed")
+  emailOnCampaignConverted Boolean @default(true) @map("email_on_campaign_converted")
+  emailOnTrialEnding Boolean @default(true) @map("email_on_trial_ending")
+  emailOnMilestones Boolean @default(true) @map("email_on_milestones")
+
+  inAppOnHighRisk Boolean @default(true) @map("in_app_on_high_risk")
+  inAppOnPaymentFailed Boolean @default(true) @map("in_app_on_payment_failed")
+  inAppOnCampaignConverted Boolean @default(true) @map("in_app_on_campaign_converted")
+
+  slackWebhookUrl String? @map("slack_webhook_url")
+  slackOnHighRisk Boolean @default(false) @map("slack_on_high_risk")
+  slackOnCampaignConverted Boolean @default(false) @map("slack_on_campaign_converted")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("user_notification_preferences")
+}
+
+
+
+model OutgoingWebhook {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name        String
+  url         String
+  secret      String?
+  enabled     Boolean @default(true)
+
+
+
+
+  maxRetries Int @default(3) @map("max_retries")
+  retryDelay Int @default(60) @map("retry_delay")
+
+
+  lastDeliveryAt DateTime? @map("last_delivery_at")
+  lastFailureAt DateTime? @map("last_failure_at")
+  failureCount Int @default(0) @map("failure_count")
+  disabledAt DateTime? @map("disabled_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  deliveries OutgoingWebhookDelivery[]
+
+  @@index([organizationId])
+  @@index([enabled])
+  @@map("outgoing_webhooks")
+}
+
+
+
+model OutgoingWebhookDelivery {
+  id        String @id @default(cuid())
+  webhookId String @map("webhook_id")
+  webhook   OutgoingWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  eventType String @map("event_type") // Type of event sent
+  payload   Json // Event payload
+
+  status OutgoingWebhookStatus
+  statusCode Int? @map("status_code") // HTTP status code
+  responseBody String? @map("response_body") @db.Text // Response from server
+  errorMessage String? @map("error_message") @db.Text // Error if failed
+
+  attemptNumber Int @default(1) @map("attempt_number") // Retry attempt number
+  deliveredAt DateTime? @map("delivered_at") // When delivered successfully
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([webhookId])
+  @@index([status])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("outgoing_webhook_deliveries")
+}
+
+
+
+model FeatureFlag {
+  id          String @id @default(cuid())
+  key         String @unique
+  name        String
+  description String? @db.Text
+
+  enabled Boolean @default(false)
+
+
+  rolloutPercentage Int @default(0) @map("rollout_percentage")
+  rolloutStrategy FeatureFlagStrategy @default(DISABLED) @map("rollout_strategy")
+
+
+  enabledOrganizations String[] @default([]) @map("enabled_organizations")
+  disabledOrganizations String[] @default([]) @map("disabled_organizations")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([key])
+  @@index([enabled])
+  @@map("feature_flags")
+}
+
+// ============================================================================
+// SETTINGS & CONFIGURATION ENUMS
+// ============================================================================
+
+enum EmailDigestFrequency {
+  REALTIME
+  HOURLY
+  DAILY
+  WEEKLY
+  NEVER
+
+  @@map("email_digest_frequency")
+}
+
+enum OutgoingWebhookStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  DISABLED
+
+  @@map("outgoing_webhook_status")
+}
+
+enum FeatureFlagStrategy {
+  DISABLED
+  ENABLED
+  PERCENTAGE_ROLLOUT
+  WHITELIST
+  BLACKLIST
+
+  @@map("feature_flag_strategy")
+}
+
+
+
+
+
+
+
+model APIKey {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name        String
+  keyPrefix   String @unique @map("key_prefix")
+  keyHash     String @unique @map("key_hash")
+
+
+  scopes String[] @default([])
+
+
+  lastUsedAt DateTime? @map("last_used_at")
+  usageCount Int @default(0) @map("usage_count")
+
+
+  enabled    Boolean @default(true)
+  expiresAt  DateTime? @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  createdBy String @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@index([keyPrefix])
+  @@index([enabled])
+  @@index([expiresAt])
+  @@map("api_keys")
+}

@@ -1,0 +1,263 @@
+
+groups:
+  - name: clickhouse_alerts
+    interval: 30s
+    rules:
+      - alert: ClickHouseHighCPU
+        expr: rate(process_cpu_seconds_total{job="clickhouse"}[5m]) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse CPU usage is high"
+          description: "ClickHouse CPU usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+          runbook: "Check slow queries, increase CPU, or scale horizontally"
+
+      - alert: ClickHouseCriticalCPU
+        expr: rate(process_cpu_seconds_total{job="clickhouse"}[5m]) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse CPU usage is critical"
+          description: "ClickHouse CPU usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+          runbook: "IMMEDIATE: Kill slow queries, scale vertically"
+
+      - alert: ClickHouseHighMemory
+        expr: clickhouse_metric_MemoryTracking / clickhouse_metric_MaxMemoryUsage > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse memory usage is high"
+          description: "ClickHouse memory usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+          runbook: "Review queries with high memory usage, increase RAM"
+
+      - alert: ClickHouseCriticalMemory
+        expr: clickhouse_metric_MemoryTracking / clickhouse_metric_MaxMemoryUsage > 0.95
+        for: 2m
+        labels:
+          severity: critical
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse memory usage is critical"
+          description: "ClickHouse memory usage is {{ $value | humanizePercentage }}"
+          runbook: "IMMEDIATE: Kill memory-intensive queries, restart if needed"
+
+      - alert: ClickHouseSlowQueries
+        expr: histogram_quantile(0.95, rate(clickhouse_metric_QueryDuration_bucket[5m])) > 10
+        for: 10m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse queries are slow"
+          description: "P95 query duration is {{ $value }}s on {{ $labels.instance }}"
+          runbook: "Check system.query_log for slow queries, add indexes, optimize"
+
+      - alert: ClickHouseHighErrorRate
+        expr: rate(clickhouse_metric_FailedQuery[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse has high query error rate"
+          description: "{{ $value }} queries/sec are failing on {{ $labels.instance }}"
+          runbook: "Check system.query_log for errors, review query syntax"
+
+      - alert: ClickHouseReplicationLag
+        expr: clickhouse_metric_ReplicasMaxAbsoluteDelay > 60
+        for: 2m
+        labels:
+          severity: critical
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse replication lag is high"
+          description: "Replication lag is {{ $value }}s on {{ $labels.instance }}"
+          runbook: "Check ZooKeeper health, network latency, restart replica if needed"
+
+      - alert: ClickHouseTooManyParts
+        expr: clickhouse_metric_PartsActive > 300
+        for: 10m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse has too many parts"
+          description: "{{ $value }} active parts on {{ $labels.instance }} (merge lag)"
+          runbook: "Increase background_pool_size, reduce insert rate, run OPTIMIZE TABLE"
+
+      - alert: ClickHouseLowDiskSpace
+        expr: clickhouse_metric_DiskAvailable / clickhouse_metric_DiskTotal < 0.15
+        for: 5m
+        labels:
+          severity: critical
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse disk space is critically low"
+          description: "Only {{ $value | humanizePercentage }} disk space remaining on {{ $labels.instance }}"
+          runbook: "IMMEDIATE: Drop old partitions, add storage, or scale"
+
+      - alert: ClickHouseModeratelyLowDiskSpace
+        expr: clickhouse_metric_DiskAvailable / clickhouse_metric_DiskTotal < 0.30
+        for: 10m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse disk space is running low"
+          description: "Only {{ $value | humanizePercentage }} disk space remaining"
+          runbook: "Plan to add storage or drop old data"
+
+      - alert: ClickHouseLowInsertRate
+        expr: rate(clickhouse_metric_InsertedRows[5m]) < 100
+        for: 10m
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse insert rate is low"
+          description: "Only {{ $value }} rows/sec being inserted (expected >100)"
+          runbook: "Check Kafka consumers, network, or ClickHouse performance"
+
+      - alert: ClickHouseReadOnlyReplicas
+        expr: clickhouse_metric_ReadonlyReplica > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: clickhouse
+        annotations:
+          summary: "ClickHouse has read-only replicas"
+          description: "{{ $value }} replicas are in read-only mode"
+          runbook: "Check ZooKeeper, disk space, and replica status"
+
+  - name: system_alerts
+    interval: 30s
+    rules:
+      - alert: HostHighCPU
+        expr: 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Host CPU usage is high"
+          description: "CPU usage is {{ $value | humanize }}% on {{ $labels.instance }}"
+
+      - alert: HostHighMemory
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Host memory usage is high"
+          description: "Memory usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+
+      - alert: HostHighDiskUsage
+        expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"})) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Host disk usage is high"
+          description: "Disk {{ $labels.mountpoint }} is {{ $value | humanizePercentage }} full"
+
+      - alert: HostHighIOWait
+        expr: avg by (instance) (irate(node_cpu_seconds_total{mode="iowait"}[5m])) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Host has high I/O wait time"
+          description: "I/O wait is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+
+  - name: pipeline_alerts
+    interval: 30s
+    rules:
+      - alert: KafkaConsumerLag
+        expr: kafka_consumer_lag > 10000
+        for: 10m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka consumer lag is high"
+          description: "Consumer {{ $labels.consumer_group }} has {{ $value }} messages lagging"
+          runbook: "Scale consumers, check consumer health, increase processing speed"
+
+      - alert: ClickHouseNoDataIngestion
+        expr: rate(clickhouse_metric_InsertedRows[5m]) == 0
+        for: 15m
+        labels:
+          severity: critical
+          component: pipeline
+        annotations:
+          summary: "No data is being inserted into ClickHouse"
+          description: "Zero rows inserted in last 15 minutes"
+          runbook: "IMMEDIATE: Check Kafka consumers, API, network connectivity"
+
+  - name: api_alerts
+    interval: 30s
+    rules:
+      - alert: APIHighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "API error rate is high"
+          description: "{{ $value | humanizePercentage }} of requests are failing"
+
+
+      - alert: APISlowResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "API response time is slow"
+          description: "P95 response time is {{ $value }}s"
+
+  - name: container_alerts
+    interval: 30s
+    rules:
+      - alert: ContainerDown
+        expr: up{job=~"clickhouse|postgres|redis|api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: container
+        annotations:
+          summary: "Container is down"
+          description: "{{ $labels.job }} on {{ $labels.instance }} is down"
+          runbook: "IMMEDIATE: Check container status, logs, restart if needed"
+
+      - alert: ContainerRestartingFrequently
+        expr: rate(container_restart_count[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: container
+        annotations:
+          summary: "Container is restarting frequently"
+          description: "{{ $labels.name }} has restarted {{ $value }} times"
+          runbook: "Check container logs, OOM kills, health checks"
+
+      - alert: ContainerHighMemory
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: container
+        annotations:
+          summary: "Container memory usage is high"
+          description: "{{ $labels.name }} is using {{ $value | humanizePercentage }} of memory limit"
